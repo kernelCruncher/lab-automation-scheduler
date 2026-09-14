@@ -8,6 +8,7 @@ from .models import (
     RUN_PENDING,
     RUN_RUNNING,
     STEP_DISPATCHED,
+    STEP_PENDING,
     Device,
     Run,
     Step,
@@ -115,6 +116,55 @@ class Store:
                 "       updated_at = now()"
                 " WHERE id = %s",
                 (STEP_DISPATCHED, step_id),
+            )
+
+    # The two halves of taking a step out of the pool and putting it back.
+    # The status names are close enough to be worth spelling out:
+    #
+    #   pending     nobody owns it -- either just created, or handed back after
+    #               a driver refused it. A candidate for dispatch, which is not
+    #               the same as ready: its dependencies may be unfinished.
+    #   dispatched  claimed here and accepted by a driver, which is working on
+    #               it now. Not a candidate; leave it alone until it reports.
+    #
+    # claim_step is called immediately before send_command, release_step only
+    # when that command is refused or never lands. Between the two a step reads
+    # as dispatched while no instrument holds it -- a few milliseconds, all of
+    # it inside the scheduler's per-run lock.
+
+    async def claim_step(self, step_id: str) -> bool:
+        """Take exclusive ownership of a pending step, atomically.
+
+        The WHERE clause is the arbiter: Postgres applies the two concurrent
+        UPDATEs one after the other, so the second finds no row in 'pending'
+        and updates nothing. Returns True only for the caller that won, which
+        is therefore the only one that may send the command.
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE steps"
+                "   SET status = %s,"
+                "       dispatch_count = dispatch_count + 1,"
+                "       dispatched_at = now(),"
+                "       updated_at = now()"
+                " WHERE id = %s AND status = %s"
+                " RETURNING id",
+                (STEP_DISPATCHED, step_id, STEP_PENDING),
+            )
+            return await cur.fetchone() is not None
+
+    async def release_step(self, step_id: str) -> None:
+        """Return a claimed step to the pool after a driver refused it.
+
+        dispatched_at is cleared so the timeline records when the step actually
+        occupied its device, not when we first offered it. dispatch_count is
+        left alone -- the attempt is worth counting.
+        """
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "UPDATE steps SET status = %s, dispatched_at = NULL, updated_at = now()"
+                " WHERE id = %s AND status = %s",
+                (STEP_PENDING, step_id, STEP_DISPATCHED),
             )
 
     async def record_step_finished(self, step_id: str, status: str, error: str = "") -> None:
