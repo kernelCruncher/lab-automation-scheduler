@@ -1,0 +1,135 @@
+name: core-system-interview-python
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: lab_admin
+      POSTGRES_PASSWORD: lab_password
+      POSTGRES_DB: lab_default
+    ports:
+      - "5442:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks: [lab-network]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab_admin -d lab_default"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4232:4222"
+      - "8232:8222"
+    volumes:
+      - nats_data:/data
+    networks: [lab-network]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://127.0.0.1:8222/healthz 2>&1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  executor:
+    build:
+      context: .
+      dockerfile: services/executor/Dockerfile
+    ports:
+      - "5001:5001"
+    environment:
+      - DATABASE_URL=postgresql://lab_admin:lab_password@postgres:5432/executor_db?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - WORKFLOWS_FILE=/app/config/workflows.yaml
+    volumes:
+      # Directory mount, not a single file -- editors that save by rename would
+      # silently detach a file mount.
+      - ./config:/app/config:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      nats: {condition: service_healthy}
+    networks: [lab-network]
+
+  liquid-handler-1:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    environment:
+      - WORKER_ID=liquid-handler-1
+      - NATS_URL=nats://nats:4222
+      - STEP_DURATION=2s
+      # 1-100: how often this instrument reports an error instead of success.
+      - FAIL_PCT=${LH_FAIL_PCT:-0}
+      # 1-100: how often it does the work but never reports back.
+      - DROP_RESULT_PCT=${LH_DROP_PCT:-0}
+    depends_on:
+      nats: {condition: service_healthy}
+    networks: [lab-network]
+
+  incubator-1:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    environment:
+      - WORKER_ID=incubator-1
+      - NATS_URL=nats://nats:4222
+      - STEP_DURATION=2s
+      # 1-100: how often this instrument reports an error instead of success.
+      - FAIL_PCT=${INC_FAIL_PCT:-0}
+      # 1-100: how often it does the work but never reports back.
+      - DROP_RESULT_PCT=${INC_DROP_PCT:-0}
+    depends_on:
+      nats: {condition: service_healthy}
+    networks: [lab-network]
+
+  plate-reader-1:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    environment:
+      - WORKER_ID=plate-reader-1
+      - NATS_URL=nats://nats:4222
+      - STEP_DURATION=2s
+      # 1-100: how often this instrument reports an error instead of success.
+      - FAIL_PCT=${PR_FAIL_PCT:-0}
+      # 1-100: how often it does the work but never reports back.
+      - DROP_RESULT_PCT=${PR_DROP_PCT:-0}
+    depends_on:
+      nats: {condition: service_healthy}
+    networks: [lab-network]
+
+  # Runs the tests. Not started by `docker compose up`.
+  #   docker compose run --rm tests
+  tests:
+    build:
+      context: .
+      dockerfile: services/executor/Dockerfile
+      target: tests
+    working_dir: /src
+    volumes:
+      - ./services:/src/services
+      - ./tests:/src/tests
+      - ./config:/src/config
+    environment:
+      # PYTHONPATH puts the mounted source ahead of the copy installed in the
+      # image, so edits to scheduler.py are picked up without a rebuild.
+      - PYTHONPATH=/src
+      - DATABASE_URL=postgresql://lab_admin:lab_password@postgres:5432/executor_db?sslmode=disable
+      - WORKFLOWS_FILE=/src/config/workflows.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [lab-network]
+    profiles: [tools]
+    command: python -m pytest -q tests/
+
+volumes:
+  postgres_data:
+  nats_data:
+
+networks:
+  lab-network:
+    driver: bridge

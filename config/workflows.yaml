@@ -1,0 +1,89 @@
+# Workflow definitions.
+#
+# A workflow is a DAG of steps. Each step names the device that must run it and
+# the steps in the same workflow that have to finish before it can start.
+#
+# Two steps with no dependency between them can run at the same time -- unless
+# they need the same device, because a device does one thing at a time.
+#
+# This file is read fresh every time a run is created, so you can edit it and
+# create another run without restarting anything.
+
+default: PCR Amplification
+
+workflows:
+  # `combine` is a liquid handling step that draws from the reagent plate and the
+  # buffer plate into the incubated sample plate. It cannot start until all three
+  # pieces of labware are ready -- not because we drew an arrow, but because the
+  # pipette has nowhere to draw from otherwise.
+  #
+  #                     ┌──> incubate_samples ──────────────────────┐
+  #                     │                                           │
+  # fill_sample_plate ──┼──> fill_reagent_plate ──> warm_reagent ────┼──> combine ──> read_plate
+  #                     │                                           │
+  #                     └──> fill_buffer_plate ─────────────────────┘
+  #
+  # fill_reagent_plate and fill_buffer_plate both need the liquid handler and
+  # both become ready at the same moment. It can only take one of them.
+  - name: PCR Amplification
+    steps:
+      # Samples into plate A.
+      - name: fill_sample_plate
+        device: liquid-handler-1
+
+      # Plate A up to temperature.
+      - name: incubate_samples
+        device: incubator-1
+        depends_on: [fill_sample_plate]
+
+      # Reagents into plate B.
+      - name: fill_reagent_plate
+        device: liquid-handler-1
+        depends_on: [fill_sample_plate]
+
+      # Buffer into plate C. Nothing to do with plate B, but the liquid handler
+      # can only fill one plate at a time.
+      - name: fill_buffer_plate
+        device: liquid-handler-1
+        depends_on: [fill_sample_plate]
+
+      # Plate B up to temperature.
+      - name: warm_reagent_plate
+        device: incubator-1
+        depends_on: [fill_reagent_plate]
+
+      # Draws from plate B and plate C into plate A. Needs all three.
+      - name: combine
+        device: liquid-handler-1
+        depends_on: [incubate_samples, warm_reagent_plate, fill_buffer_plate]
+
+      - name: read_plate
+        device: plate-reader-1
+        depends_on: [combine]
+
+  # A wider, shallower shape: three branches from one step, one per device, so
+  # nothing contends.
+  #
+  #             ┌──> pipette ────┐
+  # prepare ────┼──> incubate ───┼──> report
+  #             └──> plate_read ─┘
+  - name: Triple Assay
+    steps:
+      - name: prepare
+        device: liquid-handler-1
+
+      - name: pipette
+        device: liquid-handler-1
+        depends_on: [prepare]
+
+      - name: incubate
+        device: incubator-1
+        depends_on: [prepare]
+
+      - name: plate_read
+        device: plate-reader-1
+        depends_on: [prepare]
+
+      - name: report
+        device: plate-reader-1
+        depends_on: [pipette, incubate, plate_read]
