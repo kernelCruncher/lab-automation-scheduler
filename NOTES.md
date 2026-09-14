@@ -113,12 +113,6 @@ bounds the wait: a run can only be delayed by runs older than itself, and there
 is a fixed number of those. The same test now finishes the victim in 18s, which
 is exactly that bound — it waits for the one run ahead of it.
 
-`tests/test_concurrent_runs.py` is the one test I added, covering the deadlock:
-two runs against a bus that refuses while busy, both must finish. I checked it
-earns its keep by reverting the sweep — it fails naming the stalled run, while
-the supplied test still passes. It also asserts a refusal actually happened, so
-it cannot pass vacuously if that path stops being reached. The starvation half
-is not covered; it depends on arrival timing and I did not want a flaky test.
 
 **Critical-path ordering.** `list_steps` returns steps by name, so
 `fill_buffer_plate` beat `fill_reagent_plate` to the liquid handler at t=2.
